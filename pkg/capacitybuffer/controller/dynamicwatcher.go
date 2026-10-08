@@ -249,10 +249,12 @@ func (w *dynamicWatcher) eventHandler(groupKind schema.GroupKind) toolscache.Res
 			oldObject, err := objectMeta(oldObj)
 			if err != nil {
 				runtime.HandleError(fmt.Errorf("failed to get meta for object: %w", err))
+				return
 			}
 			newObject, err := objectMeta(newObj)
 			if err != nil {
 				runtime.HandleError(fmt.Errorf("failed to get meta for object: %w", err))
+				return
 			}
 			if oldObject.GetResourceVersion() == newObject.GetResourceVersion() {
 				return
