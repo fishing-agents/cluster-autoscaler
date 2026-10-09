@@ -47,12 +47,42 @@ type Extender struct {
 // Filter evaluates pod against each node and its complete resident occupancy
 // without mutating the supplied objects. It returns feasible nodes and failure
 // reasons, or an error if the request, transport or acknowledged response is invalid.
+// Oversized requests are split, since each node is evaluated independently.
 func (e *Extender) Filter(pod *v1.Pod, nodes []fwk.NodeInfo) ([]fwk.NodeInfo, extenderv1.FailedNodesMap, extenderv1.FailedNodesMap, error) {
 	body, err := e.buildRequest(pod, nodes)
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	if len(body) > bodyLimit && len(nodes) > 1 {
+		mid := len(nodes) / 2
+		leftNodes, leftFailed, leftUnresolvable, err := e.Filter(pod, nodes[:mid])
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		rightNodes, rightFailed, rightUnresolvable, err := e.Filter(pod, nodes[mid:])
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		return append(leftNodes, rightNodes...), mergeFailedNodes(leftFailed, rightFailed), mergeFailedNodes(leftUnresolvable, rightUnresolvable), nil
+	}
 	return e.exchange(body, nodes)
+}
+
+func mergeFailedNodes(a, b extenderv1.FailedNodesMap) extenderv1.FailedNodesMap {
+	if len(a) == 0 {
+		return b
+	}
+	if len(b) == 0 {
+		return a
+	}
+	merged := make(extenderv1.FailedNodesMap, len(a)+len(b))
+	for name, reason := range a {
+		merged[name] = reason
+	}
+	for name, reason := range b {
+		merged[name] = reason
+	}
+	return merged
 }
 
 // Kept separate so request construction can be checked for object mutation.

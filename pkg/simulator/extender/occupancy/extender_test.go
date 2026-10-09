@@ -24,6 +24,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -184,7 +185,10 @@ func TestInvalidOrLegacyResponseCannotPassIgnoredResources(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			srv, _ := server(t, alter)
 			s, _ := newSnapshot(t, func() clustersnapshot.ClusterSnapshotStore { return store.NewBasicSnapshotStore() }, srv.URL)
-			require.Error(t, s.SchedulePod(pod("probe"), "node"))
+			schedErr := s.SchedulePod(pod("probe"), "node")
+			require.Error(t, schedErr)
+			// must fail closed, not look unschedulable
+			require.Equal(t, clustersnapshot.SchedulingInternalError, schedErr.Type())
 			n, err := s.GetNodeInfo("node")
 			require.NoError(t, err)
 			require.Empty(t, n.Pods())
@@ -197,6 +201,41 @@ func TestUnknownPlacementFailsBeforeHTTP(t *testing.T) {
 	require.NoError(t, s.ForceAddPod(pod("unknown"), "node"))
 	require.Error(t, s.CheckPredicates(pod("probe"), "node"))
 	require.Empty(t, requests)
+}
+
+func TestOversizedRequestIsSplitAcrossCandidates(t *testing.T) {
+	var sizes []int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		sizes = append(sizes, len(body))
+		var request occupancy.Request
+		require.NoError(t, json.Unmarshal(body, &request))
+		result := occupancy.Result{ExtenderFilterResult: extenderv1.ExtenderFilterResult{Nodes: &v1.NodeList{}, FailedNodes: extenderv1.FailedNodesMap{}}, Simulation: &occupancy.Ack{Version: occupancy.Version, Digest: fmt.Sprintf("%x", sha256.Sum256(body))}}
+		for _, node := range request.Nodes.Items {
+			if node.Name == "fits" {
+				result.Nodes.Items = append(result.Nodes.Items, node)
+			} else {
+				result.FailedNodes[node.Name] = "full"
+			}
+		}
+		_ = json.NewEncoder(w).Encode(result)
+	}))
+	t.Cleanup(srv.Close)
+	s, _ := newSnapshot(t, func() clustersnapshot.ClusterSnapshotStore { return store.NewBasicSnapshotStore() }, srv.URL)
+	// one node fits under the limit; all four together don't
+	inventory := strings.Repeat("x", 300<<10)
+	for _, name := range []string{"full-a", "full-b", "full-c", "fits"} {
+		node := testutils.BuildTestNode(name, 10000, 1000000)
+		node.Annotations = map[string]string{"example.com/inventory": inventory}
+		require.NoError(t, s.AddNodeInfo(framework.NewTestNodeInfo(node)))
+	}
+	nodeName, err := s.SchedulePodOnAnyNodeMatching(pod("probe"), clustersnapshot.SchedulingOptions{IsNodeAcceptable: func(n *framework.NodeInfo) bool { return n.Node().Name != "node" }})
+	require.Nil(t, err)
+	require.Equal(t, "fits", nodeName)
+	require.Greater(t, len(sizes), 1)
+	for _, size := range sizes {
+		require.LessOrEqual(t, size, 1<<20)
+	}
 }
 
 func TestNominatedPodIsReallocated(t *testing.T) {

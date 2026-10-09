@@ -274,8 +274,8 @@ func (p *SchedulerPluginRunner) runExtenderFilters(pod *apiv1.Pod, candidates []
 			if extender.IsIgnorable() {
 				continue
 			}
-			return nil, clustersnapshot.NewFailingPredicateError(pod, "ExtenderFilter", nil,
-				fmt.Sprintf("extender %q filter failed: %v", extender.Name(), err), "")
+			return nil, clustersnapshot.NewSchedulingInternalError(pod,
+				fmt.Sprintf("extender %q filter failed: %v", extender.Name(), err))
 		}
 
 		filteredNodeNames := make(map[string]bool, len(filteredNodes))
